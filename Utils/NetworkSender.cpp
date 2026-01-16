@@ -4,6 +4,9 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <sstream>
+#include <cerrno>
+#include <cstring>
+#include <exception> // Для std::exception
 
 void NetworkSender::Start(const std::string& ip, int port) {
     if (isRunning) return;
@@ -16,8 +19,6 @@ void NetworkSender::Start(const std::string& ip, int port) {
 void NetworkSender::SendLog(const std::string& type, int tableId, const std::string& packetDump) {
     if (!isRunning) return;
 
-    // Формируем JSON вручную, чтобы не тянуть тяжелые библиотеки
-    // Формат: {"type": "IN", "tableId": 123, "dump": "..."}
     std::stringstream ss;
     ss << "{\"type\":\"" << type << "\",";
     ss << "\"tableId\":" << tableId << ",";
@@ -45,10 +46,7 @@ std::string NetworkSender::EscapeJson(const std::string& s) {
             case '\r': output += "\\r"; break;
             case '\t': output += "\\t"; break;
             default:
-                if ('\x00' <= c && c <= '\x1f') {
-                    // Игнорируем управляющие символы или можно кодировать в \uXXXX
-                    continue; 
-                }
+                if ('\x00' <= c && c <= '\x1f') continue;
                 output += c;
         }
     }
@@ -56,10 +54,12 @@ std::string NetworkSender::EscapeJson(const std::string& s) {
 }
 
 void NetworkSender::WorkerThread() {
+    LOGI("WorkerThread started");
+
     while (isRunning) {
         int sock = socket(AF_INET, SOCK_STREAM, 0);
         if (sock < 0) {
-            LOGE("Socket creation failed");
+            LOGE("Socket failed: %s", strerror(errno));
             std::this_thread::sleep_for(std::chrono::seconds(1));
             continue;
         }
@@ -67,46 +67,61 @@ void NetworkSender::WorkerThread() {
         struct sockaddr_in serv_addr;
         serv_addr.sin_family = AF_INET;
         serv_addr.sin_port = htons(serverPort);
-        
-        if (inet_pton(AF_INET, serverIp.c_str(), &serv_addr.sin_addr) <= 0) {
-            LOGE("Invalid address");
-            close(sock);
-            return; // Fatal error
-        }
+        inet_pton(AF_INET, serverIp.c_str(), &serv_addr.sin_addr);
 
         LOGI("Connecting to %s:%d...", serverIp.c_str(), serverPort);
         if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-            LOGE("Connection failed. Retrying in 1s...");
+            LOGE("Connect failed: %s. Retry in 1s...", strerror(errno));
             close(sock);
             std::this_thread::sleep_for(std::chrono::seconds(1));
             continue;
         }
 
-        LOGI("Connected to server!");
+        LOGI("Connected! Loop starting...");
 
-        while (isRunning) {
-            std::string payload;
-            {
-                std::unique_lock<std::mutex> lock(queueMutex);
-                cv.wait(lock, [this]{ return !queue.empty() || !isRunning; });
+        // === ГЛАВНЫЙ ЦИКЛ ОТПРАВКИ ===
+        try {
+            while (isRunning) {
+                std::string payload;
+                {
+                    // [DEBUG] Логируем вход в зону мьютекса
+                    // LOGI("Locking mutex..."); 
+                    std::unique_lock<std::mutex> lock(queueMutex);
+                    
+                    // [DEBUG] Ждем
+                    // LOGI("Waiting for cv...");
+                    cv.wait(lock, [this]{ return !queue.empty() || !isRunning; });
 
-                if (!isRunning) break;
+                    if (!isRunning) break;
 
-                payload = queue.front();
-                queue.pop();
+                    // [CRITICAL FIX] Защита от Undefined Behavior
+                    if (queue.empty()) {
+                        LOGW("Wakeup with empty queue! Spurious wakeup?");
+                        continue;
+                    }
+
+                    payload = queue.front();
+                    queue.pop();
+                } // Mutex unlocks here
+
+                payload += "\n";
+
+                // [DEBUG] Отправка
+                // LOGI("Sending %zu bytes...", payload.size());
+                
+                ssize_t sentBytes = send(sock, payload.c_str(), payload.size(), MSG_NOSIGNAL);
+                if (sentBytes < 0) {
+                    LOGE("Send error: %s", strerror(errno));
+                    break; // Reconnect
+                }
             }
-
-            // Добавляем перенос строки для JSONL
-            payload += "\n";
-
-            // Отправляем
-            ssize_t sentBytes = send(sock, payload.c_str(), payload.size(), 0);
-            if (sentBytes < 0) {
-                LOGE("Send failed. Reconnecting...");
-                break; // Выход во внешний цикл для переподключения
-            }
+        } catch (const std::exception& e) {
+            LOGE("CRASH AVOIDED in WorkerThread: %s", e.what());
+        } catch (...) {
+            LOGE("CRASH AVOIDED in WorkerThread: Unknown exception");
         }
 
+        LOGW("Closing socket and reconnecting...");
         close(sock);
     }
 }
