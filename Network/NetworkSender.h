@@ -9,26 +9,19 @@
 
 class NetworkSender {
 public:
-    // Синглтон для удобного доступа из хуков
     static NetworkSender& Instance() {
         static NetworkSender instance;
         return instance;
     }
 
-    // Запуск потока отправки
     void Start(const std::string& ip, int port);
-    
-    // Добавление лога в очередь
     void SendLog(const std::string& type, int tableId, const std::string& packetDump);
 
 private:
     NetworkSender() = default;
     ~NetworkSender() = default;
 
-    // Рабочая функция потока
     void WorkerThread();
-    
-    // Экранирование спецсимволов для JSON
     std::string EscapeJson(const std::string& s);
 
     std::string serverIp;

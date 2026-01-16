@@ -6,7 +6,7 @@
 #include <sstream>
 #include <cerrno>
 #include <cstring>
-#include <exception> // Для std::exception
+#include <exception>
 
 void NetworkSender::Start(const std::string& ip, int port) {
     if (isRunning) return;
@@ -79,22 +79,14 @@ void NetworkSender::WorkerThread() {
 
         LOGI("Connected! Loop starting...");
 
-        // === ГЛАВНЫЙ ЦИКЛ ОТПРАВКИ ===
         try {
             while (isRunning) {
                 std::string payload;
                 {
-                    // [DEBUG] Логируем вход в зону мьютекса
-                    // LOGI("Locking mutex..."); 
                     std::unique_lock<std::mutex> lock(queueMutex);
-                    
-                    // [DEBUG] Ждем
-                    // LOGI("Waiting for cv...");
                     cv.wait(lock, [this]{ return !queue.empty() || !isRunning; });
 
                     if (!isRunning) break;
-
-                    // [CRITICAL FIX] Защита от Undefined Behavior
                     if (queue.empty()) {
                         LOGW("Wakeup with empty queue! Spurious wakeup?");
                         continue;
@@ -102,17 +94,13 @@ void NetworkSender::WorkerThread() {
 
                     payload = queue.front();
                     queue.pop();
-                } // Mutex unlocks here
+                }
 
                 payload += "\n";
-
-                // [DEBUG] Отправка
-                // LOGI("Sending %zu bytes...", payload.size());
-                
                 ssize_t sentBytes = send(sock, payload.c_str(), payload.size(), MSG_NOSIGNAL);
                 if (sentBytes < 0) {
                     LOGE("Send error: %s", strerror(errno));
-                    break; // Reconnect
+                    break; 
                 }
             }
         } catch (const std::exception& e) {
