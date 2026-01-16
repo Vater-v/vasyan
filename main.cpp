@@ -1,12 +1,14 @@
 #include <jni.h>
 #include <pthread.h>
 #include <dlfcn.h>
+#include <unistd.h> // usleep
 #include "And64InlineHook.hpp"
 
-// Подключаем наши новые модули
+// Подключаем наши модули
 #include "Logger.h"
 #include "Utils.h"
 #include "Il2Cpp.h"
+#include "NetworkSender.h" // <--- Подключили
 
 // =============================================================
 // CONFIG (Оффсеты игры)
@@ -23,14 +25,26 @@ void (*orig_OnDispatchPacket)(void* instance, void* packet, int tableId);
 
 // Исходящие
 void H_SendPacket(void* instance, void* packet, int tableId) {
-    // Теперь используем удобную функцию из Il2Cpp.h
-    LOGW(">>> [OUT] (T:%d) %s", tableId, GetObjectDump(packet).c_str());
+    // Получаем дамп ПЕРЕД отправкой в очередь, т.к. в другом потоке packet может быть уже удален
+    std::string dump = GetObjectDump(packet);
+    
+    // Логируем в Logcat для отладки
+    // LOGW(">>> [OUT] (T:%d) %s", tableId, dump.c_str());
+
+    // Отправляем на сервер
+    NetworkSender::Instance().SendLog("OUT", tableId, dump);
+
     if (orig_SendPacket) orig_SendPacket(instance, packet, tableId);
 }
 
 // Входящие
 void H_OnDispatchPacket(void* instance, void* packet, int tableId) {
-    LOGI("<<< [IN]  (T:%d) %s", tableId, GetObjectDump(packet).c_str());
+    std::string dump = GetObjectDump(packet);
+    
+    // LOGI("<<< [IN]  (T:%d) %s", tableId, dump.c_str());
+    
+    NetworkSender::Instance().SendLog("IN", tableId, dump);
+
     if (orig_OnDispatchPacket) orig_OnDispatchPacket(instance, packet, tableId);
 }
 
@@ -39,11 +53,15 @@ void H_OnDispatchPacket(void* instance, void* packet, int tableId) {
 // =============================================================
 
 void* hack_thread(void*) {
-    // 1. Ждем библиотеку
+    // 1. Запускаем сетевой клиент
+    // Адрес сервера: 192.168.0.132, порт 5006
+    NetworkSender::Instance().Start("192.168.0.132", 5006);
+
+    // 2. Ждем библиотеку игры
     uintptr_t base = 0;
     while (!(base = get_lib_addr("libil2cpp.so"))) usleep(100000);
     
-    // 2. Инициализируем Il2Cpp API
+    // 3. Инициализируем Il2Cpp API
     void* handle = dlopen("libil2cpp.so", RTLD_NOW);
     if (InitIl2CppAPI(handle)) {
         LOGI("Il2Cpp API Loaded");
@@ -51,11 +69,11 @@ void* hack_thread(void*) {
         LOGE("Failed to load Il2Cpp API");
     }
 
-    // 3. Ставим хуки
+    // 4. Ставим хуки
     A64HookFunction((void*)(base + OFFSET_SEND_PACKET), (void*)H_SendPacket, (void**)&orig_SendPacket);
     A64HookFunction((void*)(base + OFFSET_DISPATCH_PACKET), (void*)H_OnDispatchPacket, (void**)&orig_OnDispatchPacket);
 
-    LOGI("=== SIMPLE SNIFFER STARTED ===");
+    LOGI("=== NETWORK SNIFFER STARTED ===");
     return nullptr;
 }
 

@@ -9,9 +9,6 @@ project("Vasyan Hmuriy")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Флаги компиляции:
-# -Wno-deprecated-declarations: Игнорировать устаревшие функции
-# -Wno-non-portable-include-path: Игнорировать разницу регистра (Utils vs utils) на Windows
 add_compile_options(
     -Wno-deprecated-declarations 
     -Wno-non-portable-include-path
@@ -20,12 +17,12 @@ add_compile_options(
 # ==========================================
 # 2. Определение исходников
 # ==========================================
-# Собираем список файлов для удобства
 set(SOURCE_FILES
     main.cpp
     utils/And64InlineHook.cpp
-    # Если в utils есть .c файлы (например, реализация хука на C), добавь их сюда:
-    # utils/And64InlineHook.c 
+    utils/Il2Cpp.cpp
+    utils/Utils.cpp
+    utils/NetworkSender.cpp  # <--- Добавили наш новый сендер
 )
 
 # ==========================================
@@ -38,16 +35,15 @@ add_library(
 )
 
 # ==========================================
-# 4. Настройка путей (Includes)
+# 4. Настройка путей
 # ==========================================
-# PRIVATE означает, что эти пути нужны только для сборки этой цели
 target_include_directories(hmuriy PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}        # Чтобы работало #include "utils/..."
-    ${CMAKE_CURRENT_SOURCE_DIR}/utils  # Чтобы работало #include "And64InlineHook.hpp"
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/utils
 )
 
 # ==========================================
-# 5. Линковка (Logcat)
+# 5. Линковка
 # ==========================================
 find_library(log-lib log)
 
