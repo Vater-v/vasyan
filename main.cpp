@@ -5,121 +5,91 @@
 #include <signal.h>
 #include "And64InlineHook.hpp"
 
-// Подключаем наши модули
 #include "Logger.h"
 #include "Utils.h"
 #include "Il2Cpp.h"
 #include "NetworkSender.h"
 
-// Определяем RTLD_NOLOAD, если его нет (для Android)
-#ifndef RTLD_NOLOAD
-#define RTLD_NOLOAD 4
-#endif
+// ГЛОБАЛЬНЫЕ ОРИГИНАЛЫ
+void* (*orig_get_deviceModel)();
+void* (*orig_get_deviceName)();
+void* (*orig_get_operatingSystem)();
 
-// =============================================================
-// CONFIG (Оффсеты игры)
-// =============================================================
-const uintptr_t OFFSET_SEND_PACKET      = 0x6D2BC60; 
-const uintptr_t OFFSET_DISPATCH_PACKET  = 0x6D2D14C; 
+// --- ХУКИ (ПОДМЕНА ДАННЫХ) ---
 
-// =============================================================
-// HOOKS
-// =============================================================
-
-void (*orig_SendPacket)(void* instance, void* packet, int tableId);
-void (*orig_OnDispatchPacket)(void* instance, void* packet, int tableId);
-
-// Исходящие
-void H_SendPacket(void* instance, void* packet, int tableId) {
-    if (packet && il2cpp_object_get_class) {
-        void* klass = il2cpp_object_get_class(packet);
-        if (klass) {
-            void* field = il2cpp_class_get_field_from_name(klass, "system");
-            if (field) {
-                void* androidString = il2cpp_string_new("android");
-                il2cpp_field_set_value(packet, field, androidString);
-                // const char* name = il2cpp_class_get_name(klass);
-                // LOGW("PATCHED: system -> android inside %s", name ? name : "Unknown");
-            }
-        }
-    }
-    std::string dump = GetObjectDump(packet);
-    NetworkSender::Instance().SendLog("OUT", tableId, dump);
-    if (orig_SendPacket) orig_SendPacket(instance, packet, tableId);
+// 1. Модель устройства
+void* H_get_deviceModel() {
+    // Возвращаем реальный флагман, чтобы игра думала, что мы на телефоне
+    // LOGW("SPOOF: SystemInfo.deviceModel requested -> Samsung SM-G991B");
+    return il2cpp_string_new("Samsung SM-G991B"); 
 }
 
-// Входящие
-void H_OnDispatchPacket(void* instance, void* packet, int tableId) {
-    std::string dump = GetObjectDump(packet);
-    NetworkSender::Instance().SendLog("IN", tableId, dump);
-    if (orig_OnDispatchPacket) orig_OnDispatchPacket(instance, packet, tableId);
+// 2. Имя устройства
+void* H_get_deviceName() {
+    // LOGW("SPOOF: SystemInfo.deviceName requested -> Galaxy S21");
+    return il2cpp_string_new("Galaxy S21 5G");
 }
 
-// =============================================================
-// MAIN THREAD
-// =============================================================
+// 3. ОС (иногда палят по строке "nox" или "vbox" в версии ядра)
+void* H_get_operatingSystem() {
+    // LOGW("SPOOF: SystemInfo.operatingSystem requested -> Android 12");
+    return il2cpp_string_new("Android OS 12 / API-31 (SP1A.210812.016/G991BXXU5CVH7)");
+}
+
+// --- ПОТОК ---
 
 void* hack_thread(void*) {
-    // Игнорируем вылеты сети
     signal(SIGPIPE, SIG_IGN); 
+    LOGI(">>> Hmuriy SystemInfo Spoofer Started <<<");
 
-    LOGI(">>> Hack Thread Started <<<");
-
-    // 1. Запуск сети
-    LOGI("Starting NetworkSender...");
-    NetworkSender::Instance().Start("192.168.0.132", 5006);
-
-    // 2. Ожидание библиотеки
-    LOGI("Waiting for libil2cpp.so...");
+    // Ждем библиотеку
     uintptr_t base = 0;
-    int wait_attempts = 0;
-    
-    // Ждем, пока библиотека появится в памяти
     while (!(base = get_lib_addr("libil2cpp.so"))) {
-        usleep(100000); // 0.1 сек
-        wait_attempts++;
-        if (wait_attempts % 50 == 0) LOGI("Still waiting... (%d)", wait_attempts);
+        usleep(100000);
     }
-    
-    LOGI("Found libil2cpp at: %p", (void*)base);
+    sleep(2); // Даем прогрузиться
 
-    // === ВАЖНОЕ ИСПРАВЛЕНИЕ ===
-    // Библиотека только что появилась. Дадим системе время завершить её инициализацию (JNI_OnLoad и т.д.)
-    // Иначе dlopen может вызвать краш из-за гонки потоков.
-    LOGI("Sleeping 3s to let libil2cpp initialize...");
-    sleep(3); 
-    // ===========================
-
-    LOGI("Attempting to get handle via dlopen...");
-    
-    // Сначала пробуем RTLD_NOLOAD (получить хендл без повторной загрузки)
-    void* handle = dlopen("libil2cpp.so", RTLD_NOW | RTLD_NOLOAD);
-    
-    if (!handle) {
-        LOGW("dlopen(NOLOAD) failed. Trying regular dlopen...");
-        handle = dlopen("libil2cpp.so", RTLD_NOW);
+    void* handle = dlopen("libil2cpp.so", RTLD_NOW);
+    if (!InitIl2CppAPI(handle)) {
+        LOGE("Failed to load Il2Cpp API!");
+        return nullptr;
     }
+    LOGI("Il2Cpp API Loaded. Searching for SystemInfo...");
 
-    if (handle) {
-        LOGI("dlopen success! Handle: %p", handle);
+    // Цикл поиска (Retry Loop)
+    bool hooked = false;
+    int attempts = 0;
+
+    while (!hooked) {
+        attempts++;
+        if (attempts % 5 == 0) LOGI("Scanning attempt %d...", attempts);
+
+        // Ищем класс SystemInfo в сборке UnityEngine.CoreModule
+        // Имя сборки может быть без расширения или с ним, проверяем по частичному совпадению в GetMethodAddress
+        void* addr_Model = GetMethodAddress("UnityEngine.CoreModule", "UnityEngine", "SystemInfo", "get_deviceModel", 0);
         
-        if (InitIl2CppAPI(handle)) {
-            LOGI("Il2Cpp API Loaded successfully");
-        } else {
-            LOGE("Failed to load Il2Cpp API (symbols not found?)");
+        if (addr_Model) {
+            LOGW(">>> FOUND SystemInfo! Applying Hooks... <<<");
+            
+            // Хукаем Model
+            A64HookFunction(addr_Model, (void*)H_get_deviceModel, (void**)&orig_get_deviceModel);
+            
+            // Хукаем Name
+            void* addr_Name = GetMethodAddress("UnityEngine.CoreModule", "UnityEngine", "SystemInfo", "get_deviceName", 0);
+            if (addr_Name) A64HookFunction(addr_Name, (void*)H_get_deviceName, (void**)&orig_get_deviceName);
+
+            // Хукаем OS
+            void* addr_OS = GetMethodAddress("UnityEngine.CoreModule", "UnityEngine", "SystemInfo", "get_operatingSystem", 0);
+            if (addr_OS) A64HookFunction(addr_OS, (void*)H_get_operatingSystem, (void**)&orig_get_operatingSystem);
+
+            hooked = true;
+            LOGW(">>> SystemInfo Spoofed Successfully! <<<");
         }
-    } else {
-        LOGE("dlopen FAILED completely. API calls won't work!");
-        // Здесь мы не выходим, так как хуки всё равно можно поставить по оффсетам,
-        // но функции типа GetObjectDump работать не будут.
+
+        if (hooked) break;
+        sleep(1);
     }
 
-    // 4. Ставим хуки
-    LOGI("Applying hooks at base: %p", (void*)base);
-    A64HookFunction((void*)(base + OFFSET_SEND_PACKET), (void*)H_SendPacket, (void**)&orig_SendPacket);
-    A64HookFunction((void*)(base + OFFSET_DISPATCH_PACKET), (void*)H_OnDispatchPacket, (void**)&orig_OnDispatchPacket);
-
-    LOGI("=== NETWORK SNIFFER FULLY READY ===");
     return nullptr;
 }
 
