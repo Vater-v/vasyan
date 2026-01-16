@@ -25,13 +25,34 @@ void (*orig_OnDispatchPacket)(void* instance, void* packet, int tableId);
 
 // Исходящие
 void H_SendPacket(void* instance, void* packet, int tableId) {
-    // Получаем дамп ПЕРЕД отправкой в очередь, т.к. в другом потоке packet может быть уже удален
+    
+    // === ЛОГИКА ПОДМЕНЫ ===
+    if (packet && il2cpp_object_get_class) {
+        void* klass = il2cpp_object_get_class(packet);
+        if (klass) {
+            // Пытаемся найти поле "system" в классе этого пакета
+            // Если поля нет, вернется null, и мы ничего не сломаем
+            void* field = il2cpp_class_get_field_from_name(klass, "system");
+            
+            if (field) {
+                // Если поле найдено, создаем новую C# строку "android"
+                void* androidString = il2cpp_string_new("android");
+                
+                // Принудительно устанавливаем значение поля
+                il2cpp_field_set_value(packet, field, androidString);
+                
+                // (Опционально) Лог для проверки, что подмена сработала
+                const char* name = il2cpp_class_get_name(klass);
+                LOGW("PATCHED: system -> android inside %s", name ? name : "Unknown");
+            }
+        }
+    }
+    // ======================
+
+    // Получаем дамп ТЕПЕРЬ, после подмены. Так мы увидим в логах уже измененное значение ("android")
     std::string dump = GetObjectDump(packet);
     
-    // Логируем в Logcat для отладки
-    // LOGW(">>> [OUT] (T:%d) %s", tableId, dump.c_str());
-
-    // Отправляем на сервер
+    // Отправляем на сервер сниффера
     NetworkSender::Instance().SendLog("OUT", tableId, dump);
 
     if (orig_SendPacket) orig_SendPacket(instance, packet, tableId);

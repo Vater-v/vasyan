@@ -8,6 +8,9 @@ void* (*il2cpp_object_get_class)(void* obj) = nullptr;
 const char* (*il2cpp_class_get_name)(void* klass) = nullptr;
 void* (*il2cpp_class_get_method_from_name)(void* klass, const char* name, int argsCount) = nullptr;
 void* (*il2cpp_runtime_invoke)(void* method, void* obj, void** params, void** exc) = nullptr;
+void* (*il2cpp_class_get_field_from_name)(void* klass, const char* name) = nullptr;
+void  (*il2cpp_field_set_value)(void* obj, void* field, void* value) = nullptr;
+void* (*il2cpp_string_new)(const char* str) = nullptr;
 
 bool InitIl2CppAPI(void* handle) {
     if (!handle) return false;
@@ -15,6 +18,10 @@ bool InitIl2CppAPI(void* handle) {
     il2cpp_class_get_name = (const char* (*)(void*))dlsym(handle, "il2cpp_class_get_name");
     il2cpp_class_get_method_from_name = (void* (*)(void*, const char*, int))dlsym(handle, "il2cpp_class_get_method_from_name");
     il2cpp_runtime_invoke = (void* (*)(void*, void*, void**, void**))dlsym(handle, "il2cpp_runtime_invoke");
+    il2cpp_class_get_field_from_name = (void* (*)(void*, const char*))dlsym(handle, "il2cpp_class_get_field_from_name");
+    il2cpp_field_set_value = (void (*)(void*, void*, void*))dlsym(handle, "il2cpp_field_set_value");
+    il2cpp_string_new = (void* (*)(const char*))dlsym(handle, "il2cpp_string_new");
+    
     return true;
 }
 
