@@ -26,12 +26,17 @@ public:
         recvCallback = cb;
     }
 
+    // === ВОТ ЭТОТ МЕТОД НУЖЕН ЗДЕСЬ ===
+    bool IsRunning() const { 
+        return isRunning; 
+    }
+
 private:
     NetworkSender() = default;
     ~NetworkSender() = default;
 
     void WorkerThread();   // Поток отправки
-    void ReceiveLoop(int sock); // Поток приема (НОВЫЙ)
+    void ReceiveLoop(int sock); // Поток приема
     
     std::string EscapeJson(const std::string& s);
 
