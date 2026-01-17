@@ -6,25 +6,32 @@
 #include <queue>
 #include <mutex>
 #include <cstdlib>
-#include <thread>
-#include <chrono>
-#include <random>
-#include <atomic>
+#include <string>
 #include <map>
 
 // =================================================================
-// 🟢 1. ЖЕСТКО ЗАДАННЫЕ АДРЕСА (ИЗ ТВОИХ ФАЙЛОВ)
+// 🟢 OFFSETS (RVAs)
 // =================================================================
 
-// Из HoldemActionButtons.cs
-const uintptr_t RVA_Buttons_Initial     = 0x741B7D0; // public void Initial(HoldemManager manager)
-const uintptr_t RVA_Buttons_SendAction  = 0x741ACB8; // public void SendRequestAction(ActionType actType, long actChips)
-const uintptr_t RVA_Buttons_OnDispose   = 0x741D144; // protected override void OnDispose()
+// Main Thread "Pulse" (Хук для выполнения кода в главном потоке)
+const uintptr_t RVA_Debug_Log           = 0x8E614EC; // UnityEngine.Debug.Log(object)
 
-// Из HoldemManager.cs
-const uintptr_t RVA_Manager_GetTid      = 0x7163438; // public int GetTid()
+// HoldemActionButtons (Жизненный цикл)
+const uintptr_t RVA_Buttons_Initial     = 0x741B7D0; 
+const uintptr_t RVA_Buttons_OnDispose   = 0x741D144; 
 
-// Сетевые (оставляем для чтения логов)
+// Button Actions (Конкретные методы нажатий из старого кода/дампа)
+const uintptr_t RVA_Check_IsVisible     = 0x741D6B4;
+const uintptr_t RVA_OnFold              = 0x741D3F8;
+const uintptr_t RVA_OnCheck             = 0x741DBD8;
+const uintptr_t RVA_OnCall              = 0x741DC90;
+// Для ставок используем универсальный метод, так как он принимает сумму
+const uintptr_t RVA_SendRequest         = 0x741ACB8; 
+
+// Managers
+const uintptr_t RVA_Manager_GetTid      = 0x7163438;
+
+// Networking (Для логов)
 const uintptr_t OFFSET_SEND_PACKET      = 0x6D2BC60; 
 const uintptr_t OFFSET_DISPATCH_PACKET  = 0x6D2D14C;
 
@@ -32,30 +39,34 @@ const uintptr_t OFFSET_DISPATCH_PACKET  = 0x6D2D14C;
 // GLOBALS
 // =================================================================
 
-// Карта: ID Стола -> Экземпляр кнопок (HoldemActionButtons)
+// Оригиналы хуков
+void (*orig_DebugLog)(void* msg);
+void (*orig_Buttons_Initial)(void* instance, void* manager);
+void (*orig_Buttons_Dispose)(void* instance);
+void (*orig_SendPacket)(void*, void*, int);
+void (*orig_OnDispatchPacket)(void*, void*, int);
+
+// Указатели на функции игры
+int  (*call_GetTid)(void* manager);
+bool (*call_Check_IsVisible)(void* instance);
+void (*call_OnFold)(void* instance);
+void (*call_OnCheck)(void* instance);
+void (*call_OnCall)(void* instance);
+void (*call_SendRequest)(void* instance, int type, int64_t chips);
+
+// Состояние
 std::map<int, void*> g_TableUI;
 std::mutex g_tableMutex;
 
-// Оригиналы функций для хуков
-static void (*orig_Buttons_Initial)(void* instance, void* manager);
-static void (*orig_Buttons_Dispose)(void* instance);
-static void (*orig_SendPacket)(void*, void*, int);
-static void (*orig_OnDispatchPacket)(void*, void*, int);
-static int  (*call_Manager_GetTid)(void* instance); // Функция игры GetTid()
-
-// Очередь действий
 struct ActionData {
     int tableId;
     std::string actionType;
-    std::string chips;
+    int64_t chips;
 };
 
+// Очередь действий (Network Thread -> Main Thread)
 std::queue<ActionData> g_actionQueue;
 std::mutex g_actionMutex;
-std::condition_variable g_actionCv;
-
-std::atomic<bool> g_botRunning{true};
-std::thread g_botThread;
 
 // =================================================================
 // HELPERS
@@ -72,25 +83,22 @@ std::string GetJsonString(const std::string& json, const std::string& key) {
     return json.substr(pos, end - pos);
 }
 
-// PP.PPPoker.GameActionType (из твоего Enum)
 int GetActionTypeValue(const std::string& typeStr) {
     if (typeStr == "ACTION_FOLD") return 1;
     if (typeStr == "ACTION_CHECK") return 2;
     if (typeStr == "ACTION_CALL") return 3;
     if (typeStr == "ACTION_RAISE") return 4;
-    if (typeStr == "ACTION_BET") return 7;   // <-- ВНИМАНИЕ: 7
+    if (typeStr == "ACTION_BET") return 7;
     if (typeStr == "ACTION_ALLIN") return 201;
     return 0;
 }
 
 // =================================================================
-// 🟢 2. ЛОГИКА НАЖАТИЯ КНОПОК
+// 🟢 ИСПОЛНЕНИЕ (MAIN THREAD)
 // =================================================================
 
-void PerformAction(const ActionData& act) {
+void PerformActionSafe(const ActionData& act) {
     void* uiInstance = nullptr;
-
-    // 1. Ищем кнопки для этого стола
     {
         std::lock_guard<std::mutex> lock(g_tableMutex);
         if (g_TableUI.find(act.tableId) != g_TableUI.end()) {
@@ -99,106 +107,86 @@ void PerformAction(const ActionData& act) {
     }
 
     if (!uiInstance) {
-        LOGE(">>> [BOT] Fail: Buttons not found for Table %d. (Try reopening table?)", act.tableId);
+        // Не нашли UI для стола
         return;
     }
 
-    // 2. Получаем метод SendRequestAction
-    // Мы знаем RVA, поэтому можем не искать его по имени, а вызвать напрямую? 
-    // Нет, безопаснее через il2cpp_runtime_invoke, чтобы Unity сама настроила контекст.
-    
-    void* klass = il2cpp_object_get_class(uiInstance);
-    if (!klass) return;
+    LOGI(">>> [MAIN THREAD] Executing %s (Chips: %lld) for Table %d", act.actionType.c_str(), act.chips, act.tableId);
 
-    // Ищем метод по имени, так надежнее
-    void* method = il2cpp_class_get_method_from_name(klass, "SendRequestAction", 2);
-    if (!method) {
-        LOGE(">>> [BOT] Fail: Method SendRequestAction not found!");
-        return;
+    // 1. FOLD
+    if (act.actionType == "ACTION_FOLD") {
+        if (call_OnFold) call_OnFold(uiInstance);
     }
+    // 2. CHECK (с проверкой, как в старой версии)
+    else if (act.actionType == "ACTION_CHECK") {
+        bool canCheck = false;
+        if (call_Check_IsVisible) canCheck = call_Check_IsVisible(uiInstance);
 
-    // 3. Аргументы: (ActionType type, long chips)
-    // ActionType - это enum (int32), chips - long (int64)
-    int32_t argType = GetActionTypeValue(act.actionType);
-    int64_t argChips = std::atoll(act.chips.c_str());
-
-    void* args[2];
-    args[0] = &argType;
-    args[1] = &argChips;
-
-    LOGI(">>> [BOT] 🟢 CLICKING BUTTON: Table=%d Type=%d Chips=%lld", act.tableId, argType, argChips);
-    
-    // 4. ВЫЗОВ!
-    il2cpp_runtime_invoke(method, uiInstance, args, nullptr);
+        if (canCheck) {
+            if (call_OnCheck) call_OnCheck(uiInstance);
+        } else {
+            LOGW(">>> [BOT] Check not visible! Fallback to FOLD.");
+            if (call_OnFold) call_OnFold(uiInstance);
+        }
+    }
+    // 3. CALL
+    else if (act.actionType == "ACTION_CALL") {
+        if (call_OnCall) call_OnCall(uiInstance);
+    }
+    // 4. BET / RAISE / ALLIN (Тут нужны аргументы суммы, используем SendRequest)
+    else {
+        int typeVal = GetActionTypeValue(act.actionType);
+        if (call_SendRequest) call_SendRequest(uiInstance, typeVal, act.chips);
+    }
 }
 
 // =================================================================
-// WORKER THREAD
+// 🟢 HOOKS
 // =================================================================
 
-void BotWorkerLoop() {
-    // Привязываем поток к Unity (IL2CPP)
-    void* il2cppThread = nullptr;
-    if (il2cpp_thread_attach && il2cpp_domain_get) {
-        il2cppThread = il2cpp_thread_attach(il2cpp_domain_get());
-        LOGI(">>> Bot Thread Attached to IL2CPP");
-    }
+// ГЛАВНЫЙ ПОТОК: Паразитируем на Debug.Log
+void H_DebugLog(void* msg) {
+    // 1. Вызываем оригинал
+    if (orig_DebugLog) orig_DebugLog(msg);
 
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> distrib(500, 2500); // Задержка
-
-    while (g_botRunning) {
+    // 2. Разгребаем очередь действий
+    while (true) {
         ActionData act;
+        bool hasAction = false;
         {
-            std::unique_lock<std::mutex> lock(g_actionMutex);
-            g_actionCv.wait(lock, []{ return !g_actionQueue.empty() || !g_botRunning; });
-
-            if (!g_botRunning) break;
-            act = g_actionQueue.front();
-            g_actionQueue.pop();
+            std::lock_guard<std::mutex> lock(g_actionMutex);
+            if (!g_actionQueue.empty()) {
+                act = g_actionQueue.front();
+                g_actionQueue.pop();
+                hasAction = true;
+            }
         }
 
-        int delay = distrib(gen);
-        LOGI(">>> [BOT] Thinking %d ms...", delay);
-        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
-
-        PerformAction(act);
-    }
-
-    if (il2cppThread && il2cpp_thread_detach) {
-        il2cpp_thread_detach(il2cppThread);
+        if (hasAction) {
+            PerformActionSafe(act);
+        } else {
+            break;
+        }
     }
 }
 
-// =================================================================
-// 🟢 3. ХУКИ (СВЯЗЫВАЕМ UI И TABLE_ID)
-// =================================================================
-
-// Хук: HoldemActionButtons.Initial(HoldemManager manager)
+// ЛОВЛЯ UI СТОЛА
 void H_Buttons_Initial(void* instance, void* manager) {
-    // Сначала вызываем оригинал, чтобы manager инициализировался
     if (orig_Buttons_Initial) orig_Buttons_Initial(instance, manager);
 
-    if (manager && call_Manager_GetTid) {
-        // Вызываем GetTid() у менеджера
-        int tid = call_Manager_GetTid(manager);
-        
+    if (manager && call_GetTid) {
+        int tid = call_GetTid(manager);
         std::lock_guard<std::mutex> lock(g_tableMutex);
         g_TableUI[tid] = instance;
-        
-        LOGI(">>> [HOOK] ✅ UI CAPTURED! TableID: %d | Buttons: %p | Manager: %p", tid, instance, manager);
-    } else {
-        LOGW(">>> [HOOK] Buttons_Initial called but manager is null or GetTid missing");
+        LOGI(">>> [HOOK] UI Captured for TableID: %d | Addr: %p", tid, instance);
     }
 }
 
-// Хук: HoldemActionButtons.OnDispose()
+// ОЧИСТКА UI
 void H_Buttons_Dispose(void* instance) {
     std::lock_guard<std::mutex> lock(g_tableMutex);
     for (auto it = g_TableUI.begin(); it != g_TableUI.end(); ) {
         if (it->second == instance) {
-            LOGI(">>> [HOOK] UI Disposed for Table %d", it->first);
             it = g_TableUI.erase(it);
         } else {
             ++it;
@@ -207,7 +195,7 @@ void H_Buttons_Dispose(void* instance) {
     if (orig_Buttons_Dispose) orig_Buttons_Dispose(instance);
 }
 
-// Сетевые хуки (только для логов)
+// СЕТЕВЫЕ ХУКИ (Только логи)
 void H_SendPacket(void* instance, void* packet, int tableId) {
     std::string dump = GetObjectDump(packet);
     NetworkSender::Instance().SendLog("PACKET_OUT", tableId, dump);
@@ -221,50 +209,59 @@ void H_OnDispatchPacket(void* instance, void* packet, int tableId) {
 }
 
 // =================================================================
-// INIT
+// INIT & NET HANDLER
 // =================================================================
 
+// Вызывается из NetworkSender (из другого потока!)
 void OnServerMessage(const std::string& json) {
     std::string msgType = GetJsonString(json, "message");
+    
     if (msgType == "ActionREQ") {
         ActionData data;
-        // ... парсинг ...
-        // (упростил для краткости, логика та же)
         size_t pPos = json.find("\"payload\":");
         if (pPos != std::string::npos) {
             std::string p = json.substr(pPos);
+            
             data.actionType = GetJsonString(p, "actionType");
-            data.chips = GetJsonString(p, "chips");
+            std::string chipsStr = GetJsonString(p, "chips");
+            data.chips = chipsStr.empty() ? 0 : std::atoll(chipsStr.c_str());
+            
             std::string tStr = GetJsonString(p, "tableId");
             data.tableId = tStr.empty() ? 0 : std::atoi(tStr.c_str());
-            
+
+            LOGI(">>> [NET] Recv Action: %s (Queueing for Main Thread)", data.actionType.c_str());
+
+            // Просто кладем в очередь, исполнит MainThread (H_DebugLog)
             {
                 std::lock_guard<std::mutex> lock(g_actionMutex);
                 g_actionQueue.push(data);
             }
-            g_actionCv.notify_one();
-            LOGI(">>> [NET] Recv Action: %s for Table %d", data.actionType.c_str(), data.tableId);
         }
     }
 }
 
 void InitTrafficMonitor(uintptr_t base_addr) {
-    LOGI(">>> [Init] Setting up Hooks...");
+    LOGI(">>> [Init] TrafficMonitor: Setting up Main Thread Hooks...");
 
-    // 1. Подготавливаем вызов GetTid
-    call_Manager_GetTid = (int (*)(void*))(base_addr + RVA_Manager_GetTid);
+    // 1. Резолвим указатели (Offsets)
+    call_GetTid          = (int(*)(void*))          (base_addr + RVA_Manager_GetTid);
+    call_Check_IsVisible = (bool(*)(void*))         (base_addr + RVA_Check_IsVisible);
+    call_OnFold          = (void(*)(void*))         (base_addr + RVA_OnFold);
+    call_OnCheck         = (void(*)(void*))         (base_addr + RVA_OnCheck);
+    call_OnCall          = (void(*)(void*))         (base_addr + RVA_OnCall);
+    call_SendRequest     = (void(*)(void*,int,int64_t))(base_addr + RVA_SendRequest);
 
-    // 2. Хуки UI (Кнопки)
+    // 2. Ставим хуки
+    // Главный цикл (Main Thread Pump)
+    A64HookFunction((void*)(base_addr + RVA_Debug_Log), (void*)H_DebugLog, (void**)&orig_DebugLog);
+
+    // UI Capture
     A64HookFunction((void*)(base_addr + RVA_Buttons_Initial), (void*)H_Buttons_Initial, (void**)&orig_Buttons_Initial);
     A64HookFunction((void*)(base_addr + RVA_Buttons_OnDispose), (void*)H_Buttons_Dispose, (void**)&orig_Buttons_Dispose);
 
-    // 3. Хуки Сети (Логирование)
+    // Network Logs
     A64HookFunction((void*)(base_addr + OFFSET_SEND_PACKET), (void*)H_SendPacket, (void**)&orig_SendPacket);
     A64HookFunction((void*)(base_addr + OFFSET_DISPATCH_PACKET), (void*)H_OnDispatchPacket, (void**)&orig_OnDispatchPacket);
 
-    // 4. Запуск бота
-    g_botThread = std::thread(BotWorkerLoop);
-    g_botThread.detach();
-
-    LOGI(">>> [Init] TrafficMonitor Ready. Waiting for Table Initial...");
+    LOGI(">>> [Init] Hooks Installed. Waiting for Debug.Log pulse...");
 }
