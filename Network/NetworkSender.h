@@ -30,7 +30,9 @@ private:
     NetworkSender() = default;
     ~NetworkSender() = default;
 
-    void WorkerThread();
+    void WorkerThread();   // Поток отправки
+    void ReceiveLoop(int sock); // Поток приема (НОВЫЙ)
+    
     std::string EscapeJson(const std::string& s);
 
     std::string serverIp;

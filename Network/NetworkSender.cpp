@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <cstring>
 #include <exception>
+#include <vector>
 
 void NetworkSender::Start(const std::string& ip, int port) {
     if (isRunning) return;
@@ -53,6 +54,45 @@ std::string NetworkSender::EscapeJson(const std::string& s) {
     return output;
 }
 
+// Новый метод для чтения данных
+void NetworkSender::ReceiveLoop(int sock) {
+    LOGI(">>> ReceiveLoop started on socket %d", sock);
+    char buffer[4096];
+    std::string pendingData;
+
+    while (isRunning) {
+        memset(buffer, 0, sizeof(buffer));
+        // Читаем данные (блокируется пока что-то не придет)
+        ssize_t bytesRead = recv(sock, buffer, sizeof(buffer) - 1, 0);
+
+        if (bytesRead > 0) {
+            // !!! ВОТ ЗДЕСЬ ВЫВОД В LOGCAT !!!
+            LOGI(">>> [SERVER MSG RAW]: %s", buffer);
+
+            // Собираем куски данных в строки (по \n)
+            pendingData += buffer;
+            size_t pos;
+            while ((pos = pendingData.find('\n')) != std::string::npos) {
+                std::string msg = pendingData.substr(0, pos);
+                pendingData.erase(0, pos + 1);
+
+                if (recvCallback) {
+                    recvCallback(msg);
+                }
+            }
+        } else if (bytesRead == 0) {
+            LOGW("Server closed connection");
+            isRunning = false;
+            break;
+        } else {
+            LOGE("Recv error: %s", strerror(errno));
+            isRunning = false;
+            break;
+        }
+    }
+    LOGI(">>> ReceiveLoop stopped");
+}
+
 void NetworkSender::WorkerThread() {
     LOGI("WorkerThread started");
 
@@ -77,7 +117,11 @@ void NetworkSender::WorkerThread() {
             continue;
         }
 
-        LOGI("Connected! Loop starting...");
+        LOGI("Connected! Starting Receiver...");
+
+        // ЗАПУСКАЕМ ЧТЕНИЕ В ОТДЕЛЬНОМ ПОТОКЕ
+        std::thread receiver(&NetworkSender::ReceiveLoop, this, sock);
+        receiver.detach(); // Отсоединяем, чтобы он работал параллельно
 
         try {
             while (isRunning) {
@@ -87,10 +131,7 @@ void NetworkSender::WorkerThread() {
                     cv.wait(lock, [this]{ return !queue.empty() || !isRunning; });
 
                     if (!isRunning) break;
-                    if (queue.empty()) {
-                        LOGW("Wakeup with empty queue! Spurious wakeup?");
-                        continue;
-                    }
+                    if (queue.empty()) continue;
 
                     payload = queue.front();
                     queue.pop();
@@ -100,16 +141,16 @@ void NetworkSender::WorkerThread() {
                 ssize_t sentBytes = send(sock, payload.c_str(), payload.size(), MSG_NOSIGNAL);
                 if (sentBytes < 0) {
                     LOGE("Send error: %s", strerror(errno));
+                    isRunning = false; // Это остановит и ReceiveLoop
                     break; 
                 }
             }
         } catch (const std::exception& e) {
-            LOGE("CRASH AVOIDED in WorkerThread: %s", e.what());
-        } catch (...) {
-            LOGE("CRASH AVOIDED in WorkerThread: Unknown exception");
+            LOGE("Exception: %s", e.what());
         }
 
-        LOGW("Closing socket and reconnecting...");
+        LOGW("Closing socket...");
+        shutdown(sock, SHUT_RDWR); // Прерываем recv в другом потоке
         close(sock);
     }
 }

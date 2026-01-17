@@ -44,7 +44,7 @@ static void* (*call_GetUrl)(void* instance);
 static int   (*call_GetMethod)(void* instance);
 
 // --- STATE ---
-void* g_NetInstance = nullptr; // Сохраняем экземпляр сетевого менеджера
+void* g_NetInstance = nullptr; 
 struct ActionData {
     int seatId;
     std::string actionType;
@@ -57,58 +57,18 @@ std::mutex g_actionMutex;
 // ACTION LOGIC
 // =================================================================
 
-// Карта типов действий (Примерная! Проверьте реальные значения Enum в игре)
-int MapActionTypeToInt(const std::string& type) {
-    if (type == "ACTION_FOLD") return 0; // Пример
-    if (type == "ACTION_CHECK") return 1;
-    if (type == "ACTION_CALL") return 2;
-    if (type == "ACTION_BET") return 3;
-    if (type == "ACTION_RAISE") return 4;
-    if (type == "ACTION_ALLIN") return 5;
-    return 0; // Default Fold
-}
-
 void PerformAction(const ActionData& act) {
     if (!g_NetInstance || !orig_SendPacket) {
         LOGE("Cannot perform action: No NetInstance or OrigFunc");
         return;
     }
     
-    // 1. Ищем класс ActionREQ (Предположительное имя, проверьте в дампе!)
-    // Обычно классы пакетов находятся в Assembly-CSharp
-    static void* klass_ActionREQ = nullptr;
-    if (!klass_ActionREQ) {
-        // Попытка найти класс. Если не находит, попробуйте указать namespace
-        klass_ActionREQ = GetMethodAddress("Assembly-CSharp", "", "ActionREQ", ".ctor", 0);
-        if (klass_ActionREQ) {
-            // GetMethodAddress возвращает адрес метода, нам нужен класс.
-            // Это хак: мы знаем что GetMethodAddress находит класс внутри.
-            // Лучше использовать il2cpp_class_from_name напрямую, но image нам неизвестен.
-            // Поэтому сделаем перебор, если GetMethodAddress не вернет именно класс.
-            // В данном коде GetMethodAddress возвращает void*, который есть адрес функции.
-            // Исправим: используем глобальный поиск или сохраним image из хуков.
-        }
-    }
+    // ВАЖНО: Тут должен быть код создания пакета.
+    LOGI(">>> EXECUTING ACTION: %s (Chips: %s, Seat: %d)", act.actionType.c_str(), act.chips.c_str(), act.seatId);
     
-    // Упрощенный поиск: используем сохраненный Image из любого другого хука или поиска
-    // В InitIl2CppAPI мы получаем domains.
-    // ДЛЯ ПРИМЕРА: Создадим объект через Reflection, если класс не найден напрямую.
-    
-    // (!) ВАЖНО: Ниже код предполагает, что мы нашли класс. 
-    // Если его нет, бот не сходит. 
-    LOGI("Performing Action: %s, Chips: %s", act.actionType.c_str(), act.chips.c_str());
-    
-    // TODO: Реализовать создание объекта ActionREQ
-    // void* packetObj = il2cpp_object_new(klass_ActionREQ);
-    
-    // ПРИМЕЧАНИЕ: Т.к. мы не знаем точного имени класса ActionREQ в игре,
-    // мы можем попробовать изменить ТЕКУЩИЙ пакет, если бы мы были в SendPacket.
-    // Но мы хотим создать НОВЫЙ.
-    
-    LOGW("Action Injection logic requires 'ActionREQ' class pointer. Implement lookup!");
+    // Пока просто логируем, так как нет конструктора ActionREQ
 }
 
-// Вызывается из главного потока (внутри хука)
 void ProcessActionQueue() {
     std::lock_guard<std::mutex> lock(g_actionMutex);
     while (!g_actionQueue.empty()) {
@@ -123,13 +83,11 @@ void ProcessActionQueue() {
 // =================================================================
 
 void H_SendPacket(void* instance, void* packet, int tableId) {
-    // 1. Захватываем instance
     if (g_NetInstance == nullptr) {
         g_NetInstance = instance;
         LOGI(">>> NetInstance captured: %p", instance);
     }
     
-    // Спуфинг (оставлен из оригинала)
     if (packet && il2cpp_object_get_class) {
         void* klass = il2cpp_object_get_class(packet);
         if (klass) {
@@ -148,22 +106,19 @@ void H_SendPacket(void* instance, void* packet, int tableId) {
 }
 
 void H_OnDispatchPacket(void* instance, void* packet, int tableId) {
-    // 1. Также захватываем instance (на случай если SendPacket еще не вызывался)
     if (g_NetInstance == nullptr) {
         g_NetInstance = instance;
     }
 
-    // 2. Логирование
     std::string dump = GetObjectDump(packet);
     NetworkSender::Instance().SendLog("PACKET_IN", tableId, dump);
     
-    // 3. ПРОВЕРКА ОЧЕРЕДИ ДЕЙСТВИЙ (Выполняем действия бота здесь, в MainThread)
+    // Выполняем действия бота здесь (в потоке игры)
     ProcessActionQueue();
 
     if (orig_OnDispatchPacket) orig_OnDispatchPacket(instance, packet, tableId);
 }
 
-// HTTP Hook (оставлен без изменений)
 void* Hook_SendWebRequest(void* instance) {
     if (instance != nullptr) {
         int methodType = -1;
@@ -184,23 +139,24 @@ void* Hook_SendWebRequest(void* instance) {
 // =================================================================
 
 void OnServerMessage(const std::string& json) {
-    // Парсинг JSON от brain.py
-    // Ожидаем: {"message": "ActionREQ", "payload": {"seatid": X, "actionType": "...", "chips": "..."}}
-    
+    // ЛОГИРУЕМ ТО, ЧТО ПОПАЛО В ПАРСЕР
+    LOGI(">>> OnServerMessage processing: %s", json.c_str());
+
     std::string msgType = GetJsonString(json, "message");
     if (msgType == "ActionREQ") {
         ActionData data;
-        // Грубый парсинг payload
         size_t payloadPos = json.find("\"payload\":");
         if (payloadPos != std::string::npos) {
             std::string payload = json.substr(payloadPos);
             data.seatId = std::atoi(GetJsonString(payload, "seatid").c_str());
             data.actionType = GetJsonString(payload, "actionType");
-            data.chips = GetJsonString(payload, "chips"); // Строка
+            data.chips = GetJsonString(payload, "chips");
             
             std::lock_guard<std::mutex> lock(g_actionMutex);
             g_actionQueue.push(data);
-            LOGI("Queued Action: %s", data.actionType.c_str());
+            LOGI(">>> Action Queued Successfully: %s", data.actionType.c_str());
+        } else {
+            LOGW(">>> ActionREQ received but no payload found!");
         }
     }
 }
