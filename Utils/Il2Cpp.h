@@ -24,8 +24,11 @@ extern void* (*il2cpp_class_get_field_from_name)(void* klass, const char* name);
 extern void  (*il2cpp_field_set_value)(void* obj, void* field, void* value);
 extern void* (*il2cpp_string_new)(const char* str);
 extern void* (*il2cpp_runtime_invoke)(void* method, void* obj, void** params, void** exc);
-// --- NEW: Object Instantiation ---
 extern void* (*il2cpp_object_new)(void* klass);
+
+// --- THREADING (NEW) ---
+extern void* (*il2cpp_thread_attach)(void* domain);
+extern void  (*il2cpp_thread_detach)(void* thread);
 
 // Функции-помощники
 bool InitIl2CppAPI(void* handle);

@@ -18,8 +18,11 @@ void* (*il2cpp_class_get_field_from_name)(void* klass, const char* name) = nullp
 void  (*il2cpp_field_set_value)(void* obj, void* field, void* value) = nullptr;
 void* (*il2cpp_string_new)(const char* str) = nullptr;
 void* (*il2cpp_runtime_invoke)(void* method, void* obj, void** params, void** exc) = nullptr;
-// --- NEW ---
 void* (*il2cpp_object_new)(void* klass) = nullptr;
+
+// --- THREADING ---
+void* (*il2cpp_thread_attach)(void* domain) = nullptr;
+void  (*il2cpp_thread_detach)(void* thread) = nullptr;
 
 bool InitIl2CppAPI(void* handle) {
     if (!handle) return false;
@@ -37,8 +40,11 @@ bool InitIl2CppAPI(void* handle) {
     il2cpp_class_get_field_from_name = (void* (*)(void*, const char*))dlsym(handle, "il2cpp_class_get_field_from_name");
     il2cpp_field_set_value = (void (*)(void*, void*, void*))dlsym(handle, "il2cpp_field_set_value");
     il2cpp_string_new = (void* (*)(const char*))dlsym(handle, "il2cpp_string_new");
-    // --- NEW ---
     il2cpp_object_new = (void* (*)(void*))dlsym(handle, "il2cpp_object_new");
+    
+    // --- THREADING ---
+    il2cpp_thread_attach = (void* (*)(void*))dlsym(handle, "il2cpp_thread_attach");
+    il2cpp_thread_detach = (void (*)(void*))dlsym(handle, "il2cpp_thread_detach");
     
     return il2cpp_domain_get && il2cpp_class_from_name;
 }
@@ -82,8 +88,6 @@ void* GetMethodAddress(const char* targetAssembly, const char* nameSpace, const 
 
         void* klass = il2cpp_class_from_name(image, nameSpace, className);
         if (klass) {
-            LOGI("[+] Found Class: %s::%s in %s", nameSpace, className, imgName);
-            
             void* method = il2cpp_class_get_method_from_name(klass, methodName, argsCount);
             if (method) {
                 LOGI("[+] Found Method: %s @ %p", methodName, *(void**)method);
