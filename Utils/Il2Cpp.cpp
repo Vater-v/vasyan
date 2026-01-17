@@ -9,7 +9,7 @@
 void* (*il2cpp_domain_get)() = nullptr;
 void** (*il2cpp_domain_get_assemblies)(void* domain, size_t* size) = nullptr;
 void* (*il2cpp_assembly_get_image)(void* assembly) = nullptr;
-const char* (*il2cpp_image_get_name)(void* image) = nullptr; // <--- НОВОЕ
+const char* (*il2cpp_image_get_name)(void* image) = nullptr;
 void* (*il2cpp_class_from_name)(void* image, const char* namespaze, const char* name) = nullptr;
 void* (*il2cpp_class_get_method_from_name)(void* klass, const char* name, int argsCount) = nullptr;
 void* (*il2cpp_object_get_class)(void* obj) = nullptr;
@@ -18,6 +18,8 @@ void* (*il2cpp_class_get_field_from_name)(void* klass, const char* name) = nullp
 void  (*il2cpp_field_set_value)(void* obj, void* field, void* value) = nullptr;
 void* (*il2cpp_string_new)(const char* str) = nullptr;
 void* (*il2cpp_runtime_invoke)(void* method, void* obj, void** params, void** exc) = nullptr;
+// --- NEW ---
+void* (*il2cpp_object_new)(void* klass) = nullptr;
 
 bool InitIl2CppAPI(void* handle) {
     if (!handle) return false;
@@ -25,7 +27,7 @@ bool InitIl2CppAPI(void* handle) {
     il2cpp_domain_get = (void* (*)())dlsym(handle, "il2cpp_domain_get");
     il2cpp_domain_get_assemblies = (void** (*)(void*, size_t*))dlsym(handle, "il2cpp_domain_get_assemblies");
     il2cpp_assembly_get_image = (void* (*)(void*))dlsym(handle, "il2cpp_assembly_get_image");
-    il2cpp_image_get_name = (const char* (*)(void*))dlsym(handle, "il2cpp_image_get_name"); // <--- Загрузка
+    il2cpp_image_get_name = (const char* (*)(void*))dlsym(handle, "il2cpp_image_get_name");
     il2cpp_class_from_name = (void* (*)(void*, const char*, const char*))dlsym(handle, "il2cpp_class_from_name");
     
     il2cpp_object_get_class = (void* (*)(void*))dlsym(handle, "il2cpp_object_get_class");
@@ -35,6 +37,8 @@ bool InitIl2CppAPI(void* handle) {
     il2cpp_class_get_field_from_name = (void* (*)(void*, const char*))dlsym(handle, "il2cpp_class_get_field_from_name");
     il2cpp_field_set_value = (void (*)(void*, void*, void*))dlsym(handle, "il2cpp_field_set_value");
     il2cpp_string_new = (void* (*)(const char*))dlsym(handle, "il2cpp_string_new");
+    // --- NEW ---
+    il2cpp_object_new = (void* (*)(void*))dlsym(handle, "il2cpp_object_new");
     
     return il2cpp_domain_get && il2cpp_class_from_name;
 }
@@ -68,20 +72,13 @@ void* GetMethodAddress(const char* targetAssembly, const char* nameSpace, const 
     size_t size = 0;
     void** assemblies = il2cpp_domain_get_assemblies(domain, &size);
 
-    // LOGI("Scanning %zu assemblies for %s...", size, targetAssembly);
-
     for (size_t i = 0; i < size; ++i) {
         void* image = il2cpp_assembly_get_image(assemblies[i]);
-        
-        // Получаем имя сборки для проверки
         const char* imgName = il2cpp_image_get_name ? il2cpp_image_get_name(image) : "unknown";
         
-        // Если задано целевое имя сборки, проверяем его (частичное совпадение)
         if (targetAssembly && strstr(imgName, targetAssembly) == nullptr) {
             continue; 
         }
-
-        // LOGI("Checking image: %s", imgName);
 
         void* klass = il2cpp_class_from_name(image, nameSpace, className);
         if (klass) {
@@ -91,8 +88,6 @@ void* GetMethodAddress(const char* targetAssembly, const char* nameSpace, const 
             if (method) {
                 LOGI("[+] Found Method: %s @ %p", methodName, *(void**)method);
                 return *(void**)method; 
-            } else {
-                LOGE("[-] Method %s not found in class %s (Args: %d)", methodName, className, argsCount);
             }
         }
     }

@@ -3,12 +3,10 @@
 #include <dlfcn.h>
 #include <unistd.h>
 
-// Подключаем модули
 #include "Logger.h"
 #include "Utils.h"
 #include "Il2Cpp.h"
 #include "Spoofer.h"
-// Новые модули из Network
 #include "NetworkSender.h"
 #include "TrafficMonitor.h"
 
@@ -18,7 +16,11 @@
 void* hack_thread(void*) {
     // 1. ЗАПУСК СЕТЕВОГО КЛИЕНТА
     LOGI(">>> Starting Network Sender...");
-    // IP и порт настраиваются здесь, на верхнем уровне
+    
+    // Подключаем callback приема сообщений
+    NetworkSender::Instance().SetCallback(OnServerMessage);
+    
+    // IP и порт
     NetworkSender::Instance().Start("192.168.0.132", 5006); 
 
     // 2. ОЖИДАНИЕ БИБЛИОТЕКИ ИГРЫ
@@ -27,7 +29,7 @@ void* hack_thread(void*) {
     while ((base_addr = get_lib_addr("libil2cpp.so")) == 0) {
         usleep(100000);
     }
-    sleep(3); // Даем игре немного прогрузиться
+    sleep(3); 
 
     // 3. INIT API
     LOGI(">>> libil2cpp loaded. Init API...");
@@ -38,15 +40,10 @@ void* hack_thread(void*) {
     }
 
     // 4. УСТАНОВКА ХУКОВ
-    // Теперь это просто вызовы инициализации модулей
-    
-    // Модуль спуфинга устройства
     InitSpoofers();
-
-    // Модуль перехвата трафика (Пакеты + HTTP)
     InitTrafficMonitor(base_addr);
 
-    LOGI("=== ULTIMATE SNIFFER READY ===");
+    LOGI("=== ULTIMATE SNIFFER & BOT READY ===");
     return nullptr;
 }
 

@@ -6,6 +6,10 @@
 #include <queue>
 #include <atomic>
 #include <condition_variable>
+#include <functional>
+
+// Тип callback-а для получения сообщений
+using RecvCallback = std::function<void(const std::string&)>;
 
 class NetworkSender {
 public:
@@ -16,6 +20,11 @@ public:
 
     void Start(const std::string& ip, int port);
     void SendLog(const std::string& type, int tableId, const std::string& packetDump);
+    
+    // Установка обработчика входящих сообщений
+    void SetCallback(RecvCallback cb) {
+        recvCallback = cb;
+    }
 
 private:
     NetworkSender() = default;
@@ -33,4 +42,6 @@ private:
     std::queue<std::string> queue;
     std::mutex queueMutex;
     std::condition_variable cv;
+    
+    RecvCallback recvCallback = nullptr;
 };

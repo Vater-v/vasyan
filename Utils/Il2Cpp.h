@@ -15,7 +15,7 @@ struct Il2CppString {
 extern void* (*il2cpp_domain_get)();
 extern void** (*il2cpp_domain_get_assemblies)(void* domain, size_t* size);
 extern void* (*il2cpp_assembly_get_image)(void* assembly);
-extern const char* (*il2cpp_image_get_name)(void* image); // <--- НОВОЕ
+extern const char* (*il2cpp_image_get_name)(void* image);
 extern void* (*il2cpp_class_from_name)(void* image, const char* namespaze, const char* name);
 extern void* (*il2cpp_class_get_method_from_name)(void* klass, const char* name, int argsCount);
 extern void* (*il2cpp_object_get_class)(void* obj);
@@ -24,6 +24,8 @@ extern void* (*il2cpp_class_get_field_from_name)(void* klass, const char* name);
 extern void  (*il2cpp_field_set_value)(void* obj, void* field, void* value);
 extern void* (*il2cpp_string_new)(const char* str);
 extern void* (*il2cpp_runtime_invoke)(void* method, void* obj, void** params, void** exc);
+// --- NEW: Object Instantiation ---
+extern void* (*il2cpp_object_new)(void* klass);
 
 // Функции-помощники
 bool InitIl2CppAPI(void* handle);
