@@ -2,8 +2,8 @@
 #include <cstdint>
 #include <string>
 
-// Функция для установки всех сетевых хуков (Game Packet + HTTP)
+// Функция для установки всех сетевых хуков
 void InitTrafficMonitor(uintptr_t base_addr);
 
-// Обработка сообщений от сервера (вызывается из NetworkSender thread)
+// Обработка сообщений от сервера
 void OnServerMessage(const std::string& json);

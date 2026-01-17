@@ -26,7 +26,7 @@ extern void* (*il2cpp_string_new)(const char* str);
 extern void* (*il2cpp_runtime_invoke)(void* method, void* obj, void** params, void** exc);
 extern void* (*il2cpp_object_new)(void* klass);
 
-// --- THREADING (NEW) ---
+// --- THREADING (ВАЖНО) ---
 extern void* (*il2cpp_thread_attach)(void* domain);
 extern void  (*il2cpp_thread_detach)(void* thread);
 
