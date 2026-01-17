@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_compile_options(
     -Wno-deprecated-declarations 
-    -Wno-non-portable-include-path
+    -Wno-nonportable-include-path
 )
 
 # Добавляем папку Network в пути поиска заголовков
