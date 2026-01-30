@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <string>
 #include <unistd.h> 
+#include <time.h> // Добавлено для работы с таймером
 
 // =================================================================
 // ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
@@ -28,7 +29,9 @@ void* g_UIInstance = nullptr;
 // --- ОРИГИНАЛЫ МЕТОДОВ ---
 void (*orig_SendPacket)(void* packet, int tableId, bool mask, void* method);
 void (*orig_ReceviePacket)(void* packet, int tableId, void* method);
-void (*orig_DebugLog)(void* message, void* method);
+
+// [UPDATED] Вместо Debug.Log используем get_deltaTime
+float (*orig_get_deltaTime)();
 
 // Хуки для захвата инстанса (чтобы сохранить оригинал и вызвать его)
 void (*orig_OnEnable)(void* instance, void* method) = nullptr;
@@ -39,9 +42,19 @@ void (*orig_OnCheck)(void* instance, void* method) = nullptr;
 // --- МЕТОДЫ ДЛЯ ВЫЗОВА ---
 void* method_SendRequestAction = nullptr;
 
+// --- ТАЙМЕРЫ ---
+uint64_t lastCheckTime = 0;
+
 // =================================================================
 // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 // =================================================================
+
+// Функция получения времени в мс (для ограничения частоты проверок)
+uint64_t GetTickCountMs() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
 
 std::string GetJsonValue(const std::string& json, const std::string& key) {
     std::string qKey = "\"" + key + "\":";
@@ -72,8 +85,6 @@ int MapActionTypeToEnum(const std::string& typeStr) {
 
 void ExecuteGameAction(const ActionData& act) {
     if (!g_UIInstance) {
-        // Если инстанс еще не пойман, бот не может ходить
-        // Это может случиться, если бот запущен, но стол еще не открыт
         static bool warned = false;
         if (!warned) {
             LOGW(">>> [BOT-WAIT] UI Instance missing! Waiting for OnEnable or Button Click...");
@@ -87,7 +98,6 @@ void ExecuteGameAction(const ActionData& act) {
         return;
     }
 
-    // Подготовка аргументов: SendRequestAction(int actionType, long chips)
     int actionType = act.actionEnum;
     int64_t chips = act.chips;
 
@@ -97,8 +107,7 @@ void ExecuteGameAction(const ActionData& act) {
 
     LOGI(">>> [BOT-EXEC] Invoking SendRequestAction(%d, %lld) on Obj %p", actionType, (long long)chips, g_UIInstance);
 
-    // Прямой вызов метода игры. Игра сама создаст пакет и отправит его.
-    // Это на 100% безопасно, так как мы используем "родной" код.
+    // Безопасный вызов в Main Thread (мы уже внутри get_deltaTime)
     il2cpp_runtime_invoke(method_SendRequestAction, g_UIInstance, args, nullptr);
 }
 
@@ -106,7 +115,6 @@ void ExecuteGameAction(const ActionData& act) {
 // 🟢 ХУКИ ЗАХВАТА ИНСТАНСА
 // =================================================================
 
-// Общая функция для захвата "this"
 void CaptureInstance(void* instance) {
     if (instance && g_UIInstance != instance) {
         g_UIInstance = instance;
@@ -125,7 +133,7 @@ void H_Start(void* instance, void* method) {
 }
 
 void H_OnCall(void* instance, void* method) {
-    CaptureInstance(instance); // Если авто-захват не сработал, сработает при нажатии
+    CaptureInstance(instance);
     if (orig_OnCall) orig_OnCall(instance, method);
 }
 
@@ -135,7 +143,7 @@ void H_OnCheck(void* instance, void* method) {
 }
 
 // =================================================================
-// 🟢 ГЛАВНЫЙ ЦИКЛ (Debug.Log) + СНИФФЕР
+// 🟢 ГЛАВНЫЙ ЦИКЛ (Time.get_deltaTime) + СНИФФЕР
 // =================================================================
 
 void H_SendPacket(void* packet, int tableId, bool mask, void* method) {
@@ -154,27 +162,39 @@ void H_ReceviePacket(void* packet, int tableId, void* method) {
     if (orig_ReceviePacket) orig_ReceviePacket(packet, tableId, method);
 }
 
-void H_DebugLog(void* message, void* method) {
-    // 1. Оригинал
-    if (orig_DebugLog) orig_DebugLog(message, method);
+// [UPDATED] Новый главный хук. Вызывается игрой сотни раз в секунду.
+float H_get_deltaTime() {
+    // 1. Сначала вызываем оригинал, чтобы не сломать логику игры
+    float dt = 0.0f;
+    if (orig_get_deltaTime) {
+        dt = orig_get_deltaTime();
+    }
 
-    // 2. Проверка очереди
-    bool shouldAct = false;
-    ActionData act;
+    // 2. Проверяем очередь действий, но с ограничением частоты (раз в 50мс)
+    uint64_t now = GetTickCountMs();
+    if (now - lastCheckTime > 50) { 
+        lastCheckTime = now;
 
-    // Быстрая проверка без блокировки, если очередь пуста
-    if (g_actionMutex.try_lock()) {
-        if (!g_actionQueue.empty()) {
-            act = g_actionQueue.front();
-            g_actionQueue.pop();
-            shouldAct = true;
+        bool shouldAct = false;
+        ActionData act;
+
+        // Потокобезопасная проверка очереди
+        if (g_actionMutex.try_lock()) {
+            if (!g_actionQueue.empty()) {
+                act = g_actionQueue.front();
+                g_actionQueue.pop();
+                shouldAct = true;
+            }
+            g_actionMutex.unlock();
         }
-        g_actionMutex.unlock();
+
+        // Если есть действие — выполняем
+        if (shouldAct) {
+            ExecuteGameAction(act);
+        }
     }
 
-    if (shouldAct) {
-        ExecuteGameAction(act);
-    }
+    return dt;
 }
 
 // =================================================================
@@ -191,10 +211,11 @@ void InitTrafficMonitor(uintptr_t base_addr) {
         void* addr_RecvPacket = GetMethodAddress(nullptr, "PP.PPPoker", "Protocol", "ReceviePacket", 2);
         if (!addr_RecvPacket) addr_RecvPacket = GetMethodAddress(nullptr, "PP.PPPoker", "Protocol", "ReceivePacket", 2);
 
-        // 2. Ищем Debug.Log (Цикл исполнения)
-        void* addr_DebugLog = GetMethodAddress("UnityEngine", "UnityEngine", "Debug", "Log", 1);
+        // 2. [UPDATED] Ищем Time.get_deltaTime вместо Debug.Log
+        // Находится в UnityEngine.CoreModule
+        void* addr_DeltaTime = GetMethodAddress("UnityEngine.CoreModule", "UnityEngine", "Time", "get_deltaTime", 0);
 
-        // 3. Ищем методы для захвата инстанса (OnEnable, Start, Кнопки)
+        // 3. Ищем методы для захвата инстанса
         void* addr_OnEnable = GetMethodAddress(nullptr, "PP.PPPoker", "HoldemActionButtons", "OnEnable", 0);
         void* addr_Start    = GetMethodAddress(nullptr, "PP.PPPoker", "HoldemActionButtons", "Start", 0);
         void* addr_OnCall   = GetMethodAddress(nullptr, "PP.PPPoker", "HoldemActionButtons", "OnCallButtonClick", 0);
@@ -211,27 +232,25 @@ void InitTrafficMonitor(uintptr_t base_addr) {
                 if (klass_Buttons) break;
             }
             if (klass_Buttons) {
-                // Пытаемся найти с 2 аргументами (ActionType, chips)
                 method_SendRequestAction = il2cpp_class_get_method_from_name(klass_Buttons, "SendRequestAction", 2);
                 if (method_SendRequestAction) LOGI(">>> [Reflect] Found SendRequestAction!");
             }
         }
 
-        // ПРОВЕРКА: Нам нужны Сеть, Лог и Метод Действия. 
-        // Хуки захвата (OnEnable/Start) опциональны (хотя бы один должен быть).
         bool captureMethodFound = (addr_OnEnable || addr_Start || addr_OnCall);
 
-        if (addr_SendPacket && addr_RecvPacket && addr_DebugLog && method_SendRequestAction && captureMethodFound) {
+        // ПРОВЕРКА: Нужны Сеть, DeltaTime и Метод Действия.
+        if (addr_SendPacket && addr_RecvPacket && addr_DeltaTime && method_SendRequestAction && captureMethodFound) {
             LOGI(">>> [Init] Components found. Installing Hooks...");
 
             // Сеть
             A64HookFunction(addr_SendPacket, (void*)H_SendPacket, (void**)&orig_SendPacket);
             A64HookFunction(addr_RecvPacket, (void*)H_ReceviePacket, (void**)&orig_ReceviePacket);
             
-            // Цикл
-            A64HookFunction(addr_DebugLog, (void*)H_DebugLog, (void**)&orig_DebugLog);
+            // [UPDATED] Цикл (DeltaTime)
+            A64HookFunction(addr_DeltaTime, (void*)H_get_deltaTime, (void**)&orig_get_deltaTime);
 
-            // Захват инстанса (ставим хуки на всё, что нашли, для надежности)
+            // Захват инстанса
             if (addr_OnEnable) A64HookFunction(addr_OnEnable, (void*)H_OnEnable, (void**)&orig_OnEnable);
             if (addr_Start)    A64HookFunction(addr_Start,    (void*)H_Start,    (void**)&orig_Start);
             if (addr_OnCall)   A64HookFunction(addr_OnCall,   (void*)H_OnCall,   (void**)&orig_OnCall);
@@ -245,9 +264,9 @@ void InitTrafficMonitor(uintptr_t base_addr) {
         if (attempts % 5 == 0) {
             LOGW(">>> [Init] Waiting... (Attempt %d)", attempts);
             if (!addr_SendPacket) LOGW("    - Missing: Protocol.SendPacket");
-            if (!addr_DebugLog) LOGW("    - Missing: Debug.Log");
-            if (!method_SendRequestAction) LOGW("    - Missing: SendRequestAction (Check Class/Method Name)");
-            if (!captureMethodFound) LOGW("    - Missing: Any Capture Method (OnEnable/Start/OnCall)");
+            if (!addr_DeltaTime) LOGW("    - Missing: Time.get_deltaTime");
+            if (!method_SendRequestAction) LOGW("    - Missing: SendRequestAction");
+            if (!captureMethodFound) LOGW("    - Missing: Capture Methods");
         }
         
         sleep(1);
